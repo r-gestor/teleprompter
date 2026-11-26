@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teleprompter por voz</title>
+<style>
+  :root {
+    --bg: #000; --fg: #f2f2f2; --dim: #5a5a5a; --hl: #ffd34d; --accent: #3fa9ff;
+    --font: 30px; --scale: 1; --top: 1.5vh;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: system-ui, "Segoe UI", Arial, sans-serif; overflow: hidden; }
+
+  /* ---------- Editor ---------- */
+  #editor { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 12px;
+    padding: 20px; background: #111; z-index: 10; }
+  #editor h1 { margin: 0; font-size: 22px; }
+  #editor p { margin: 0; color: #aaa; font-size: 14px; }
+  #script { flex: 1; width: 100%; resize: none; background: #000; color: #eee; border: 1px solid #333;
+    border-radius: 8px; padding: 16px; font-size: 18px; line-height: 1.5; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button, select { background: #222; color: #eee; border: 1px solid #444; border-radius: 6px;
+    padding: 8px 14px; font-size: 15px; cursor: pointer; }
+  button:hover { background: #333; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600; }
+
+  /* ---------- Prompter ---------- */
+  #prompter { position: fixed; inset: 0; overflow: hidden; }
+  /* columna 9:16 centrada horizontalmente */
+  #stage { position: absolute; top: 0; left: 50%; height: 100vh;
+    width: min(100vw, calc(100vh * 9 / 16 * var(--scale))); transform: translateX(-50%);
+    overflow: hidden; border-left: 1px solid #151515; border-right: 1px solid #151515;
+    -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 50%, transparent 90%);
+            mask-image: linear-gradient(to bottom, #000 0, #000 50%, transparent 90%); }
+  #text { position: absolute; left: 0; right: 0; top: 0; padding: 0 6% 100vh;
+    transition: transform .35s ease-out; text-align: center;
+    font-size: var(--font); line-height: 1.4; font-weight: 600; }
+  #prompter.mirror #stage { transform: translateX(-50%) scaleX(-1); }
+  #text .w { transition: color .2s; }
+  #text .w.done { color: var(--dim); }
+  #text .w.cur { color: var(--hl); }
+  #text p { margin: 0 0 .6em; }
+  /* ---------- Bullets ---------- */
+  #text.bullets { text-align: left; }
+  #text .b { position: relative; padding-left: 1.1em; margin: 0 0 .8em; color: #8a8a8a;
+    font-size: .8em; transition: color .25s, font-size .25s; cursor: pointer; }
+  #text .b::before { content: '•'; position: absolute; left: 0; color: #555; }
+  #text .b.cur { color: var(--fg); font-size: 1em; }
+  #text .b.cur::before { color: var(--hl); }
+  #text .b.done { color: #3d3d3d; }
+  #text .b .k { text-decoration: underline; text-decoration-color: #444; text-underline-offset: .15em; }
+  #text .b .k.hit { color: var(--hl); text-decoration-color: var(--hl); }
+
+  /* ---------- Barra de controles (abajo, para no tapar la cámara) ---------- */
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px; align-items: center;
+    flex-wrap: wrap; padding: 10px 16px; background: rgba(20,20,20,.92); border-top: 1px solid #333;
+    font-size: 14px; z-index: 5; transition: opacity .3s; }
+  #bar.hide { opacity: 0; }
+  #bar:hover { opacity: 1; }
+  #status { margin-left: auto; color: #aaa; max-width: 40vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #dot { width: 10px; height: 10px; border-radius: 50%; background: #666; display: inline-block; margin-right: 6px; }
+  #dot.on { background: #e33; box-shadow: 0 0 8px #e33; }
+  .hidden { display: none !important; }
+  /* diagnóstico siempre visible, chico, abajo */
+  #diag { position: fixed; left: 50%; transform: translateX(-50%); bottom: 64px; z-index: 6;
+    background: rgba(25,25,25,.9); border: 1px solid #333; border-radius: 8px; padding: 6px 10px;
+    font-size: 12px; color: #bbb; display: flex; gap: 10px; align-items: center; max-width: 92vw; }
+  #diag .heard { color: #fff; max-width: 45vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #diag .err { color: #ff8a65; }
+  #meter { width: 60px; height: 8px; background: #333; border-radius: 4px; overflow: hidden; flex: none; }
+  #meter > div { height: 100%; width: 0; background: #4caf50; transition: width .08s; }
+  #meter.speaking > div { background: #ffd34d; }
+  .mic-test { margin-left: auto; display: flex; align-items: center; gap: 10px; color: #bbb; font-size: 14px; }
+  .meter2 { width: 220px; height: 14px; background: #2a2a2a; border-radius: 7px; overflow: hidden; display: inline-block; }
+  .meter2 > div { height: 100%; width: 0; background: #4caf50; transition: width .08s; }
+  .meter2.speaking > div { background: #ffd34d; }
+</style>
+</head>
+<body>
+
+<!-- Editor del guion -->
+<div id="editor">
+  <h1>Teleprompter por voz</h1>
+  <p>Pega tu guion, elige el idioma y pulsa <b>Comenzar</b>. El texto avanza a medida que hablas y la línea que lees queda arriba, junto a la cámara.
+     Funciona en <b>Chrome</b> o <b>Edge</b> con internet.</p>
+  <textarea id="script" placeholder="Pega aquí tu guion..."></textarea>
+  <div class="row">
+    <label>Idioma:
+      <select id="lang">
+        <option value="es-CL">Español (Chile)</option>
+        <option value="es-MX">Español (México)</option>
+        <option value="es-ES">Español (España)</option>
+        <option value="es-AR">Español (Argentina)</option>
+        <option value="es-CO">Español (Colombia)</option>
+        <option value="es-US">Español (EE. UU.)</option>
+        <option value="en-US">English (US)</option>
+      </select>
+    </label>
+    <label>Tipo:
+      <select id="kind">
+        <option value="bullets">Bullet points (una idea por línea)</option>
+        <option value="script">Guion completo (palabra por palabra)</option>
+      </select>
+    </label>
+    <button class="primary" id="startBtn">Comenzar ▶</button>
+    <span class="mic-test">🎤 Señal del micrófono:
+      <span id="meter2" class="meter2"><div></div></span>
+      <span id="micInfo">activando…</span>
+    </span>
+  </div>
+</div>
+
+<!-- Prompter -->
+<div id="prompter" class="hidden">
+  <div id="stage"><div id="text"></div></div>
+</div>
+
+<div id="bar" class="hidden">
+  <button id="micBtn"><span id="dot"></span>Micrófono</button>
+  <button id="modeBtn" title="Cambiar modo de seguimiento (V)">Modo: Palabras</button>
+  <button id="slower" title="Más lento, modo volumen ([)">🐢</button>
+  <button id="faster" title="Más rápido, modo volumen (])">🐇</button>
+  <button id="smaller" title="Letra más chica (-)">A−</button>
+  <button id="bigger" title="Letra más grande (+)">A+</button>
+  <button id="narrow" title="Más angosto">⟷−</button>
+  <button id="wide" title="Más ancho">⟷+</button>
+  <button id="mirrorBtn" title="Espejo (M)">Espejo</button>
+  <button id="restart" title="Volver al inicio (Inicio)">⏮ Inicio</button>
+  <button id="editBtn" title="Editar guion (Esc)">✎ Editar</button>
+  <span id="status">← → mover · Espacio pausa · Esc editar</span>
+</div>
+<div id="diag" class="hidden">
+  <div id="meter"><div></div></div>
+  <span id="dRec">Reconocimiento: —</span>
+  <span class="heard" id="dHeard"></span>
+  <span id="dPos"></span>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem('tp_' + k); return v === null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem('tp_' + k, v); } catch {} }
+  };
+
+  // ---------- Estado ----------
+  let words = [];      // palabras normalizadas del guion
+  let spans = [];      // spans correspondientes
+  let pos = 0;         // índice de la próxima palabra por decir
+  let fontSize = +store.get('font2', 30);
+  let width = +store.get('width2', 100);   // % del ancho 9:16
+  let mirror = store.get('mirror', '0') === '1';
+  let listening = false, wantListen = false;
+  let rec = null;
+
+  $('script').value = store.get('script', '');
+  $('lang').value = store.get('lang', 'es-CL');
+  $('kind').value = store.get('kind', 'bullets');
+  let kind = $('kind').value;
+  let bullets = [];    // [{el, kw:[normalizados], kspans:[{n, el}]}]  (en modo bullets, spans = divs y pos = bullet actual)
+  const STOP = new Set(('para como pero porque cuando donde desde hasta entre sobre este esta estos estas ese esa esos esas ' +
+    'aquel aquella todo toda todos todas otro otra otros otras muy mas menos solo tambien tampoco ademas entonces ' +
+    'luego despues antes ahora aqui alli algo alguien nada nadie cada cual cuales quien quienes cuyo tengo tiene ' +
+    'tienen tenemos hacer hace hacen hago puede pueden puedo poder vamos voy van estar estoy estamos estan sera ' +
+    'eres somos fueron fue ser hay haber habia sido siendo eso esto ellos ellas ustedes nosotros usted mismo misma ' +
+    'bien mucho mucha muchos muchas poco poca pocos pocas tanto tanta asi segun sino sean sobre').split(' '));
+
+  const norm = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+                     .replace(/[^a-z0-9ñ]/g, '');
+
+  function applyStyle() {
+    document.documentElement.style.setProperty('--font', fontSize + 'px');
+    document.documentElement.style.setProperty('--scale', width / 100);
+    $('prompter').classList.toggle('mirror', mirror);
+    store.set('font2', fontSize); store.set('width2', width); store.set('mirror', mirror ? '1' : '0');
+    lastTop = -1;
+    requestAnimationFrame(() => scrollTo(pos, true));
+  }
+
+  // ---------- Construir el texto ----------
+  function buildBullets(text) {
+    const root = $('text');
+    root.innerHTML = ''; root.classList.add('bullets');
+    words = []; spans = []; bullets = [];
+    text.split('\n').map(l => l.replace(/^\s*([-•*–·>]|\d+[.)])\s*/, '').trim()).filter(Boolean).forEach((line, bi) => {
+      const div = document.createElement('div');
+      div.className = 'b';
+      const kw = [], kspans = [];
+      line.split(/\s+/).forEach(tok => {
+        const n = norm(tok);
+        const sp = document.createElement('span');
+        sp.textContent = tok;
+        if (n.length >= 4 && !STOP.has(n) && !/^\d+$/.test(n) || /^\d{2,}$/.test(n)) {
+          sp.className = 'k';
+          if (!kw.includes(n)) kw.push(n);
+          kspans.push({ n, el: sp });
+        }
+        div.appendChild(sp);
+        div.appendChild(document.createTextNode(' '));
+      });
+      if (!kw.length) line.split(/\s+/).map(norm).filter(n => n.length >= 3).forEach(n => kw.includes(n) || kw.push(n));
+      root.appendChild(div);
+      spans.push(div); words.push('b' + bi);
+      bullets.push({ el: div, kw, kspans });
+    });
+    pos = 0;
+    paint();
+  }
+
+  function build(text) {
+    if (kind === 'bullets') return buildBullets(text);
+    const root = $('text');
+    root.innerHTML = ''; root.classList.remove('bullets');
+    words = []; spans = []; bullets = [];
+    text.split(/\n\s*\n|\n/).forEach(par => {
+      if (!par.trim()) return;
+      const p = document.createElement('p');
+      par.split(/\s+/).filter(Boolean).forEach(tok => {
+        const n = norm(tok);
+        const sp = document.createElement('span');
+        sp.className = 'w';
+        sp.textContent = tok;
+        p.appendChild(sp);
+        p.appendChild(document.createTextNode(' '));
+        if (n) { words.push(n); spans.push(sp); }
+      });
+      root.appendChild(p);
+    });
+    pos = 0;
+    paint();
+  }
+
+  // ---------- Pintar y desplazar ----------
+  let lastTop = -1;
+  function paint() {
+    spans.forEach((s, i) => {
+      s.classList.toggle('done', i < pos);
+      s.classList.toggle('cur', i === pos);
+    });
+    if (kind === 'bullets') {
+      pos = Math.min(pos, Math.max(0, spans.length - 1));
+      bullets.forEach(b => b.kspans.forEach(k => k.el.classList.remove('hit')));
+      $('dPos').textContent = 'Bullet ' + (spans.length ? pos + 1 : 0) + '/' + spans.length;
+      consumeHeard();
+    } else {
+      $('dPos').textContent = Math.min(pos, words.length) + '/' + words.length;
+    }
+    scrollTo(pos);
+  }
+
+  function scrollTo(i, force) {
+    if (!spans.length) return;
+    const sp = spans[Math.min(i, spans.length - 1)];
+    const top = sp.offsetTop;
+    if (!force && top === lastTop) return;
+    lastTop = top;
+    $('text').style.transform = `translateY(calc(var(--top) - ${top}px))`;
+  }
+
+  // ---------- Coincidencia de voz con el guion ----------
+  function similar(a, b) {
+    if (a === b) return true;
+    if (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) return true;
+    if (a.length >= 5 && b.length >= 5 && Math.abs(a.length - b.length) <= 1) return lev(a, b) <= 1;
+    return false;
+  }
+  function lev(a, b) {
+    const m = a.length, n = b.length, d = Array.from({ length: m + 1 }, (_, i) => [i]);
+    for (let j = 1; j <= n; j++) d[0][j] = j;
+    for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++)
+      d[i][j] = Math.min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+    return d[m][n];
+  }
+
+  function match(heard) {
+    const tail = heard.slice(-6);
+    if (!tail.length || !words.length) return;
+    const lo = Math.max(0, pos - 6), hi = Math.min(words.length - 1, pos + 30);
+    let best = -1, bestScore = 0;
+    for (let e = lo; e <= hi; e++) {
+      // alinear de atrás hacia adelante, permitiendo saltar una palabra en el guion
+      let score = 0, wi = e, miss = 0;
+      for (let k = tail.length - 1; k >= 0 && wi >= 0; k--) {
+        if (similar(tail[k], words[wi])) { score++; wi--; miss = 0; }
+        else if (wi > 0 && similar(tail[k], words[wi - 1])) { score += 0.8; wi -= 2; }
+        else { if (++miss > 2) break; }
+      }
+      if (!similar(tail[tail.length - 1], words[e])) score -= 0.5;   // la última palabra oída debe coincidir
+      score -= Math.abs(e + 1 - pos) * 0.03;                         // preferir lo cercano
+      if (score > bestScore) { bestScore = score; best = e; }
+    }
+    if (best < 0) return;
+    const next = best + 1;
+    const ahead = next - pos;
+    // aceptar: avance cercano con 1 palabra, saltos largos o retrocesos sólo con más evidencia
+    const ok = (ahead >= 0 && ahead <= 4 && bestScore >= 0.8) ||
+               (ahead > 4 && bestScore >= 1.7) ||
+               (ahead < 0 && bestScore >= 2.8);
+    if (ok && next !== pos) { pos = Math.min(next, words.length); paint(); }
+  }
+
+  // ---------- Coincidencia en modo bullets: palabras clave del siguiente bullet ----------
+  let consumed = { idx: 0, count: 0 }, lastIdx = 0, lastCount = 0;
+  function consumeHeard() { consumed = { idx: lastIdx, count: lastCount }; }   // olvidar lo ya dicho
+
+  function matchBullets(heard) {
+    const cur = bullets[pos];
+    if (!cur || !heard.length) return;
+    let best = -1, bestR = 0, info = '';
+    for (let j = pos + 1; j <= Math.min(pos + 3, bullets.length - 1); j++) {
+      const b = bullets[j];
+      const kw = b.kw.filter(k => !cur.kw.some(c => similar(c, k)));   // ignorar palabras que también están en el actual
+      if (!kw.length) continue;
+      const hits = kw.filter(k => heard.some(h => similar(h, k)));
+      let need = j === pos + 1 ? Math.min(2, kw.length) : Math.min(3, kw.length);
+      // la primera palabra clave (el tema del bullet) basta para pasar al siguiente
+      if (j === pos + 1 && kw[0] === b.kw[0] && kw[0].length >= 5 && hits.includes(kw[0])) need = 1;
+      if (j === pos + 1) {
+        b.kspans.forEach(k => k.el.classList.toggle('hit', hits.includes(k.n)));
+        info = ' · siguiente ' + Math.min(hits.length, need) + '/' + need;
+      }
+      if (hits.length >= need) {
+        const r = hits.length / kw.length - (j - pos - 1) * 0.15;
+        if (r > bestR) { bestR = r; best = j; }
+      }
+    }
+    if (best >= 0) { pos = best; paint(); }
+    else $('dPos').textContent = 'Bullet ' + (pos + 1) + '/' + bullets.length + info;
+  }
+
+  function onHeardBullets(results) {
+    const toks = i => results[i][0].transcript.split(/\s+/).map(norm).filter(Boolean);
+    let heard = [];
+    for (let i = consumed.idx; i < results.length; i++) {
+      const t = toks(i);
+      heard.push(...(i === consumed.idx ? t.slice(consumed.count) : t));
+    }
+    lastIdx = results.length - 1; lastCount = toks(lastIdx).length;
+    matchBullets(heard.slice(-25));
+  }
+
+  // ---------- Reconocimiento de voz ----------
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  function setStatus(t) { $('status').textContent = t; }
+  function setMic(on) { listening = on; $('dot').classList.toggle('on', on); }
+  function setRec(t, err) { $('dRec').textContent = t; $('dRec').classList.toggle('err', !!err); }
+
+  // ---------- Modo: "words" (sigue tus palabras) o "volume" (avanza mientras suena tu voz) ----------
+  let mode = store.get('mode', 'words');
+  let wps = +store.get('wps', 2.3);          // palabras por segundo en modo volumen
+  let lastResultAt = 0, speakNoResult = 0;
+  function setMode(m, why) {
+    mode = m; store.set('mode', m);
+    $('modeBtn').textContent = m === 'words' ? 'Modo: Palabras' : 'Modo: Volumen';
+    if (why) setStatus(why);
+  }
+  function fallback(why) {
+    if (kind === 'bullets') { setStatus(why + ' — usa ↑ ↓ o la rueda para cambiar de bullet.'); return; }
+    if (mode !== 'volume') setMode('volume', why + ' → cambié a modo Volumen (avanza mientras hablas).'); }
+
+  // ---------- Medidor de volumen (micrófono) ----------
+  let audioOn = false, speaking = false, floor = 0.01, hang = 0, acc = 0, lastT = 0;
+  async function startAudio() {
+    if (audioOn) return;
+    audioOn = true;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      // Chrome deja el audio "suspendido" hasta que interactúas con la página
+      const resume = () => { if (ctx.state !== 'running') ctx.resume(); };
+      ['pointerdown', 'keydown', 'focusin'].forEach(ev => document.addEventListener(ev, resume));
+      resume();
+      const src = ctx.createMediaStreamSource(stream);
+      const an = ctx.createAnalyser(); an.fftSize = 1024; src.connect(an);
+      const buf = new Float32Array(an.fftSize);
+      const tick = t => {
+        an.getFloatTimeDomainData(buf);
+        let s = 0; for (const v of buf) s += v * v;
+        const rms = Math.sqrt(s / buf.length);
+        const dt = lastT ? Math.min(0.1, (t - lastT) / 1000) : 0; lastT = t;
+        // ruido de fondo adaptativo
+        floor = rms < floor ? floor * 0.9 + rms * 0.1 : floor * 0.999 + rms * 0.001;
+        const loud = rms > Math.max(0.015, floor * 3);
+        hang = loud ? 0.3 : Math.max(0, hang - dt);
+        speaking = loud || hang > 0;
+        const lvl = Math.min(100, rms * 500) + '%';
+        for (const id of ['meter', 'meter2']) {
+          $(id).firstElementChild.style.width = lvl;
+          $(id).classList.toggle('speaking', speaking);
+        }
+        $('micInfo').textContent = speaking ? 'te escucho ✔' : (rms > 0.002 ? 'recibiendo señal' : 'sin señal — habla o revisa el micrófono');
+        if (wantListen && speaking && kind !== 'bullets') {
+          if (mode === 'volume') {
+            acc += wps * dt;
+            if (acc >= 1) { const n = Math.floor(acc); acc -= n; pos = Math.min(words.length, pos + n); paint(); }
+          } else if (performance.now() - lastResultAt > 1500) {
+            speakNoResult += dt;
+            if (speakNoResult > 6) fallback('El reconocimiento no está entendiendo tu voz');
+          }
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    } catch (e) {
+      audioOn = false;
+      setRec('Micrófono bloqueado: ' + e.name, true);
+      $('micInfo').textContent = 'micrófono bloqueado (' + e.name + ') — permite el acceso en el candado de la barra de direcciones';
+    }
+  }
+
+  function startRec() {
+    startAudio();
+    wantListen = true;
+    if (!SR) { setRec('Este navegador no tiene reconocimiento de voz', true); fallback('Navegador sin reconocimiento de voz'); return; }
+    if (rec) { try { rec.start(); } catch {} return; }
+    rec = new SR();
+    rec.lang = $('lang').value;
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    rec.onstart = () => {
+      setMic(true); setRec('Reconocimiento: escuchando');
+      consumed = { idx: 0, count: 0 }; lastIdx = 0; lastCount = 0;   // cada sesión nueva reinicia los resultados
+    };
+    rec.onresult = ev => {
+      // juntar los resultados recientes (finales + parciales) para tener contexto
+      let txt = '';
+      for (let i = Math.max(0, ev.results.length - 2); i < ev.results.length; i++) txt += ' ' + ev.results[i][0].transcript;
+      const heard = txt.split(/\s+/).map(norm).filter(Boolean);
+      lastResultAt = performance.now(); speakNoResult = 0;
+      $('dHeard').textContent = '“' + txt.trim().split(/\s+/).slice(-8).join(' ') + '”';
+      if (kind === 'bullets') onHeardBullets(ev.results); else match(heard);
+    };
+    rec.onerror = e => {
+      if (e.error === 'no-speech' || e.error === 'aborted') return;
+      setRec('Reconocimiento: error ' + e.error, true);
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed' ||
+          e.error === 'network' || e.error === 'language-not-supported') {
+        recBroken = true;
+        fallback('El reconocimiento de voz falló (' + e.error + ')');
+      }
+    };
+    rec.onend = () => {
+      setMic(false);
+      if (wantListen && !recBroken) setTimeout(() => { try { rec.start(); } catch {} }, 150); // Chrome corta solo; reiniciar
+      else if (!wantListen) { setRec('Pausado · Espacio para continuar'); }
+    };
+    try { rec.start(); } catch {}
+  }
+  let recBroken = false;
+  function stopRec() { wantListen = false; setMic(false); setRec('Pausado · Espacio para continuar'); if (rec) try { rec.stop(); } catch {} }
+  function toggleRec() { wantListen ? stopRec() : startRec(); }
+
+  // ---------- Vistas ----------
+  function showPrompter() {
+    const text = $('script').value.trim();
+    if (!text) { $('script').focus(); return; }
+    store.set('script', $('script').value);
+    store.set('lang', $('lang').value);
+    kind = $('kind').value; store.set('kind', kind);
+    ['modeBtn', 'slower', 'faster'].forEach(id => $(id).classList.toggle('hidden', kind === 'bullets'));
+    if (rec && rec.lang !== $('lang').value) { stopRec(); rec = null; }
+    $('editor').classList.add('hidden');
+    $('prompter').classList.remove('hidden');
+    $('bar').classList.remove('hidden');
+    $('diag').classList.remove('hidden');
+    setMode(mode);
+    build(text);
+    applyStyle();
+    startRec();
+    autoHideBar();
+  }
+  function showEditor() {
+    stopRec();
+    $('editor').classList.remove('hidden');
+    $('prompter').classList.add('hidden');
+    $('bar').classList.add('hidden');
+    $('diag').classList.add('hidden');
+    $('script').focus();
+  }
+
+  let hideT;
+  function autoHideBar() {
+    $('bar').classList.remove('hide');
+    clearTimeout(hideT);
+    hideT = setTimeout(() => $('bar').classList.add('hide'), 3000);
+  }
+  document.addEventListener('mousemove', () => { if (!$('bar').classList.contains('hidden')) autoHideBar(); });
+
+  startAudio();   // medidor activo desde que abres la página
+
+  window.__tp = {
+    match: t => match(t.split(/\s+/).map(norm).filter(Boolean)),
+    hear: list => onHeardBullets(list.map(t => [{ transcript: t }])),   // simula resultados de voz
+    get pos() { return pos; }
+  };
+
+  function move(d) { pos = Math.max(0, Math.min(words.length, pos + d)); paint(); }
+
+  // ---------- Eventos ----------
+  $('startBtn').onclick = showPrompter;
+  $('editBtn').onclick = showEditor;
+  $('micBtn').onclick = toggleRec;
+  $('bigger').onclick = () => { fontSize = Math.min(120, fontSize + 2); applyStyle(); };
+  $('smaller').onclick = () => { fontSize = Math.max(14, fontSize - 2); applyStyle(); };
+  $('wide').onclick = () => { width = Math.min(200, width + 10); applyStyle(); };
+  $('narrow').onclick = () => { width = Math.max(50, width - 10); applyStyle(); };
+  if (location.protocol === 'file:') {
+    const warn = document.createElement('p');
+    warn.style.color = '#ffb84d';
+    warn.innerHTML = '⚠ Abriste el archivo directo, así el navegador pide el micrófono a cada rato. Ábrelo con <b>“Abrir teleprompter.bat”</b>.';
+    $('editor').insertBefore(warn, $('script'));
+  }
+  $('mirrorBtn').onclick = () => { mirror = !mirror; applyStyle(); };
+  $('modeBtn').onclick = () => {
+    if (mode === 'words') setMode('volume', 'Modo Volumen: avanza mientras suena tu voz. Ajusta la velocidad con 🐢 🐇');
+    else {
+      speakNoResult = 0; recBroken = false; setMode('words', 'Modo Palabras: sigue lo que vas diciendo');
+      if (wantListen && rec && !listening) try { rec.start(); } catch {}
+    }
+  };
+  const showWps = () => setStatus('Velocidad modo volumen: ' + wps.toFixed(1) + ' palabras/seg');
+  $('slower').onclick = () => { wps = Math.max(0.8, +(wps - 0.2).toFixed(1)); store.set('wps', wps); showWps(); };
+  $('faster').onclick = () => { wps = Math.min(5, +(wps + 0.2).toFixed(1)); store.set('wps', wps); showWps(); };
+  $('restart').onclick = () => { pos = 0; paint(); };
+  $('text').addEventListener('click', e => {               // clic en una palabra = saltar ahí
+    const i = spans.indexOf(e.target.closest('.w, .b'));
+    if (i >= 0) { pos = i; paint(); }
+  });
+  // rueda del mouse / touchpad: mover el guion línea por línea (arriba = volver)
+  function moveLine(dir) {
+    if (!spans.length) return;
+    const cur = Math.min(pos, spans.length - 1);
+    const top = spans[cur].offsetTop;
+    let i = cur;
+    if (dir < 0) {
+      while (i > 0 && spans[i].offsetTop >= top) i--;           // última palabra de la línea anterior
+      const prevTop = spans[i].offsetTop;
+      if (prevTop === top) return;
+      while (i > 0 && spans[i - 1].offsetTop === prevTop) i--;   // inicio de esa línea
+    } else {
+      while (i < spans.length - 1 && spans[i].offsetTop <= top) i++;
+      if (spans[i].offsetTop === top) return;
+    }
+    pos = i; acc = 0; paint();
+  }
+  let wheelAcc = 0;
+  $('prompter').addEventListener('wheel', e => {
+    e.preventDefault();
+    wheelAcc += e.deltaY;
+    const step = 40;
+    while (wheelAcc <= -step) { moveLine(-1); wheelAcc += step; }
+    while (wheelAcc >= step) { moveLine(1); wheelAcc -= step; }
+  }, { passive: false });
+
+  window.addEventListener('resize', () => { lastTop = -1; scrollTo(pos, true); });
+
+  document.addEventListener('keydown', e => {
+    if (!$('editor').classList.contains('hidden')) {
+      if (e.key === 'Enter' && e.ctrlKey) showPrompter();
+      return;
+    }
+    switch (e.key) {
+      case 'Escape': showEditor(); break;
+      case ' ': e.preventDefault(); toggleRec(); break;
+      case 'ArrowRight': move(1); break;
+      case 'ArrowLeft': move(-1); break;
+      case 'ArrowDown': e.preventDefault(); move(kind === 'bullets' ? 1 : 10); break;
+      case 'ArrowUp': e.preventDefault(); move(kind === 'bullets' ? -1 : -10); break;
+      case 'Home': pos = 0; paint(); break;
+      case '+': case '=': $('bigger').click(); break;
+      case '-': $('smaller').click(); break;
+      case 'm': case 'M': $('mirrorBtn').click(); break;
+      case 'v': case 'V': $('modeBtn').click(); break;
+      case '[': $('slower').click(); break;
+      case ']': $('faster').click(); break;
+      case 'f': case 'F':
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen?.(); else document.exitFullscreen?.();
+        break;
+    }
+  });
+})();
+</script>
+</body>
+</html>
